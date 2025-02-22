@@ -11,6 +11,10 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
 
+      - name: Install Xcode Command Line Tools
+        run: |
+          xcode-select --install
+
       - name: Install dependencies
         run: |
           brew install boost
