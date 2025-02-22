@@ -1,0 +1,27 @@
+name: Build Ardour (macOS)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: brew install cmake gtkmm jack
+
+      - name: Build Ardour
+        run: |
+          ./waf configure --prefix=/output
+          ./waf build -j$(sysctl -n hw.ncpu)
+          ./waf install
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ardour-macos
+          path: /output
