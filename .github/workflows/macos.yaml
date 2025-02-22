@@ -39,7 +39,7 @@ jobs:
           brew install libwebsockets
           brew install lrdf
           brew install serd
-          brew install sordw
+          brew install sord
           brew install sratom
           brew install lilv
 
