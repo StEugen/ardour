@@ -15,7 +15,6 @@ jobs:
         run: |
           choco install msys2
           refreshenv
-          pacman -S --needed base-devel mingw-w64-x86_64-gcc cmake
 
       - name: Build Ardour
         shell: msys2 {0}
