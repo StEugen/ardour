@@ -12,7 +12,36 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: brew install cmake gtkmm jack boost
+        run: |
+          brew install boost
+          export CPLUS_INCLUDE_PATH=/opt/homebrew/Cellar/boost/1.84.0_1/include
+          brew install pkg-config
+          brew install glib
+          brew install glibmm@2.66
+          brew install libsndfile
+          brew install libarchive
+          export PKG_CONFIG_PATH="/opt/homebrew/opt/libarchive/lib/pkgconfig:$PKG_CONFIG_PATH"
+          brew install liblo
+          brew install taglib
+          brew install vamp-plugin-sdk
+          brew install rubberband
+          brew install libusb
+          brew install jack
+          brew install fftw
+          brew install aubio
+          brew install libpng
+          brew install pango
+          brew install libsigc++@2
+          brew install cairomm@1.14
+          brew install pangomm@2.46
+          brew install lv2
+          brew install cppunit
+          brew install libwebsockets
+          brew install lrdf
+          brew install serd
+          brew install sordw
+          brew install sratom
+          brew install lilv
 
       - name: Set up environment variables
         run: |
