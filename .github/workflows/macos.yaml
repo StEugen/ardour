@@ -12,7 +12,12 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: brew install cmake gtkmm jack boost
+        run: brew install cmake gtkmm jack boost boost-devel alsa-lib alsa-lib-devel
+
+      - name: Set up environment variables
+        run: |
+          export BOOST_ROOT=$(brew --prefix boost)
+          export PKG_CONFIG_PATH="$BOOST_ROOT/lib/pkgconfig:$PKG_CONFIG_PATH"
 
       - name: Build Ardour
         run: |
@@ -20,8 +25,13 @@ jobs:
           ./waf build -j$(sysctl -n hw.ncpu)
           ./waf install
 
-      - name: Upload Artifact
+      - name: Package into macOS Application Bundle
+        run: |
+          cd tools/osx_packaging
+          ./osx_build --public
+
+      - name: Upload macOS App Bundle
         uses: actions/upload-artifact@v4
         with:
-          name: ardour-macos
-          path: /output
+          name: ardour-macos-app
+          path: tools/osx_packaging/*.app
