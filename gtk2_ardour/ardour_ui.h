@@ -640,6 +640,7 @@ private:
 	void set_session (ARDOUR::Session *);
 	void connect_dependents_to_session (ARDOUR::Session *);
 	void we_have_dependents ();
+	void setup_action_tooltips ();
 
 	void setup_session_options ();
 
@@ -843,7 +844,7 @@ private:
 	ArdourWidgets::ArdourButton recorder_visibility_button;
 	ArdourWidgets::ArdourButton trigger_page_visibility_button;
 
-	bool key_press_focus_accelerator_handler (Gtk::Window& window, GdkEventKey* ev, Gtkmm2ext::Bindings*);
+	bool key_press_focus_accelerator_handler (Gtk::Window& window, GdkEventKey* ev, Gtkmm2ext::BindingSet*);
 	bool try_gtk_accel_binding (GtkWindow* win, GdkEventKey* ev, bool translate, GdkModifierType modifier);
 
 	bool main_window_delete_event (GdkEventAny*);

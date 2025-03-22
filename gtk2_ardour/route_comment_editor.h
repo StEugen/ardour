@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2025 Paul Davis <paul@linuxaudiosystems.com>
+ * Copyright (C) 2025 Robin Gareus <robin@gareus.org>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -18,31 +18,36 @@
 
 #pragma once
 
-#include "ardour_window.h"
+#include <memory>
 
 #include <ytkmm/box.h>
+#include <ytkmm/textview.h>
 
-namespace ARDOUR {
-	class MidiRegion;
-	class MidiTrack;
-	class Track;
-}
+#include "ardour/route.h"
 
-class Pianoroll;
-class RegionEditor;
+#include "ardour_window.h"
 
-class PianorollWindow : public ArdourWindow
+class BoolOption;
+
+class RouteCommentEditor : public ArdourWindow
 {
 public:
-	PianorollWindow (std::string const & name, ARDOUR::Session&);
-	~PianorollWindow ();
+	RouteCommentEditor ();
+	~RouteCommentEditor ();
 
-	void set (std::shared_ptr<ARDOUR::MidiTrack>, std::shared_ptr<ARDOUR::MidiRegion>);
-	bool on_key_press_event (GdkEventKey*);
-	bool on_delete_event (GdkEventAny*);
+	void reset ();
+	void toggle (std::shared_ptr<ARDOUR::Route>);
+	void open (std::shared_ptr<ARDOUR::Route>);
 
 private:
-	Gtk::HBox     hpacker;
-	Pianoroll*    pianoroll;
-	RegionEditor* region_editor;
+	void comment_changed ();
+	void commit_change ();
+
+	Gtk::TextView _comment_area;
+	Gtk::VBox     _vbox;
+	BoolOption*   _bo;
+	bool          _ignore_change;
+
+	std::shared_ptr<ARDOUR::Route> _route;
+	PBD::ScopedConnectionList      _connections;
 };

@@ -175,9 +175,6 @@ MixerStrip::MixerStrip (Mixer_UI& mx, Session* sess, std::shared_ptr<Route> rt, 
 
 	if (is_master () && !_route->comment().empty () && _session->config.get_show_master_bus_comment_on_load () && self_destruct) {
 		open_comment_editor ();
-		_comment_window->hide ();
-		_comment_window->set_position (Gtk::WIN_POS_CENTER_ON_PARENT);
-		_comment_window->present ();
 		/* show only once */
 		_session->config.set_show_master_bus_comment_on_load (false);
 	}
@@ -426,6 +423,7 @@ MixerStrip::init ()
 
 	parameter_changed (X_("mixer-element-visibility"));
 	UIConfiguration::instance().ParameterChanged.connect (sigc::mem_fun (*this, &MixerStrip::parameter_changed));
+	UIConfiguration::instance().DPIReset.connect (sigc::mem_fun (*this, &MixerStrip::dpi_reset));
 	 Config->ParameterChanged.connect (_config_connection, invalidator (*this), std::bind (&MixerStrip::parameter_changed, this, _1), gui_context());
 	 _session->config.ParameterChanged.connect (_config_connection, invalidator (*this), std::bind (&MixerStrip::parameter_changed, this, _1), gui_context());
 
@@ -624,8 +622,12 @@ MixerStrip::set_route (std::shared_ptr<Route> rt)
 
 		_loudess_analysis_button->show ();
 		_volume_controller->show ();
+		if (Config->get_use_master_volume ()) {
+			master_volume_table.show ();
+		}
 #ifdef MIXBUS
 	} else if (!route()->is_master()) {
+		/* mixbus has/had a show_all, empty table still adds some pixel padding */
 		master_volume_table.hide ();
 #endif
 	}
@@ -724,7 +726,6 @@ MixerStrip::set_route (std::shared_ptr<Route> rt)
 	/* now force an update of all the various elements */
 
 	name_changed ();
-	comment_changed ();
 	route_group_changed ();
 	update_track_number_visibility ();
 
@@ -786,6 +787,12 @@ MixerStrip::set_stuff_from_route ()
 	if (get_gui_property ("strip-width", width)) {
 		set_width_enum (width, this);
 	}
+}
+
+void
+MixerStrip::dpi_reset ()
+{
+	set_width_enum (_width, _width_owner);
 }
 
 void

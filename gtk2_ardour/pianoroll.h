@@ -46,12 +46,12 @@ namespace ArdourWidgets {
 }
 
 class PianorollMidiView;
-class CueMidiBackground;
+class PianorollMidiBackground;
 
 class Pianoroll : public CueEditor
 {
   public:
-	Pianoroll (std::string const & name);
+	Pianoroll (std::string const & name, bool with_transport_controls = false);
 	~Pianoroll ();
 
 	ArdourCanvas::Container* get_trackview_group () const { return data_group; }
@@ -119,6 +119,8 @@ class Pianoroll : public CueEditor
 	Gdk::Cursor* which_canvas_cursor (ItemType type) const;
 
 	void set_visible_channel (int chan);
+	int visible_channel () const { return _visible_channel; }
+
 	void note_mode_clicked();
 	ARDOUR::NoteMode note_mode() const { return _note_mode; }
 	void set_note_mode (ARDOUR::NoteMode);
@@ -135,6 +137,10 @@ class Pianoroll : public CueEditor
 	void paste (float times, bool from_context_menu);
 	void keyboard_paste ();
 	void cut_copy (Editing::CutCopyOp);
+
+	PianorollMidiView* midi_view() const { return view; }
+	void set_session (ARDOUR::Session*);
+	bool allow_trim_cursors () const;
 
   protected:
 	void load_bindings ();
@@ -213,7 +219,7 @@ class Pianoroll : public CueEditor
 	ParameterButtonMap parameter_button_map;
 	void rebuild_parameter_button_map ();
 
-	CueMidiBackground* bg;
+	PianorollMidiBackground* bg;
 	PianorollMidiView* view;
 
 	void build_canvas ();
@@ -252,6 +258,7 @@ class Pianoroll : public CueEditor
 
 	sigc::connection _update_connection;
 	PBD::ScopedConnectionList object_connections;
+	PBD::ScopedConnectionList view_connections;
 	void maybe_update ();
 	void trigger_prop_change (PBD::PropertyChange const &);
 
@@ -284,16 +291,25 @@ class Pianoroll : public CueEditor
 	std::pair<Temporal::timepos_t,Temporal::timepos_t> max_zoom_extent() const;
 
 	void point_selection_changed ();
-	bool enter (GdkEventCrossing*);
 
 	bool zoom_in_allocate;
 
 	ArdourWidgets::ArdourButton rec_enable_button;
-	void rec_enable_clicked ();
-	Gtk::Adjustment bar_adjustment;
-	Gtk::SpinButton bar_spinner;
+	ArdourWidgets::ArdourButton play_button;
+	ArdourWidgets::ArdourButton solo_button;
+	ArdourWidgets::ArdourButton loop_button;
+
+	bool play_button_press (GdkEventButton*);
+	bool solo_button_press (GdkEventButton*);
+	bool loop_button_press (GdkEventButton*);
+
+	ArdourWidgets::ArdourDropdown length_selector;
+	Temporal::BBT_Offset rec_length;
 	Gtk::Label length_label;
 	Gtk::HBox   rec_box;
+	Gtk::HBox   play_box;
+
+	void set_recording_length (Temporal::BBT_Offset bars);
 
 	bool rec_button_press (GdkEventButton*);
 	void rec_enable_change ();
@@ -304,4 +320,10 @@ class Pianoroll : public CueEditor
 	void add_multi_controller_item (Gtk::Menu_Helpers::MenuList& ctl_items, uint16_t channels, int ctl, const std::string& name, ArdourWidgets::MetaButton*);
 	void reset_user_cc_choice (std::string, Evoral::Parameter param, ArdourWidgets::MetaButton*);
 
+	bool ignore_channel_changes;
+	void visible_channel_changed ();
+
+	bool with_transport_controls;
+	void update_solo_display ();
+	void map_transport_state ();
 };

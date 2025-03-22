@@ -146,6 +146,7 @@ class MidiView : public virtual sigc::trackable, public LineMerger
 	virtual void set_model (std::shared_ptr<ARDOUR::MidiModel>);
 
 	void set_show_source (bool yn);
+	bool show_source () const { return _show_source; }
 
 	NoteBase* add_note(const std::shared_ptr<NoteType> note, bool visible);
 
@@ -276,11 +277,6 @@ class MidiView : public virtual sigc::trackable, public LineMerger
 	void finish_resizing (NoteBase* primary, bool at_front, double delat_x, bool relative, double snap_delta, bool with_snap);
 	void abort_resizing ();
 
-	/** Change the channel of the selection.
-	 * @param channel - the channel number of the new channel, zero-based
-	 */
-	void change_channel(uint8_t channel);
-
 	struct NoteResizeData {
 		::Note                  *note;
 		ArdourCanvas::Rectangle *resize_rect;
@@ -293,7 +289,7 @@ class MidiView : public virtual sigc::trackable, public LineMerger
 	 * is true.
 	 */
 
-	Temporal::timecnt_t relative_position (Temporal::timepos_t const & p) const;
+	Temporal::timecnt_t view_position_to_model_position (Temporal::timepos_t const & p) const;
 
 	Temporal::timepos_t source_beats_to_timeline (Temporal::Beats const &) const;
 
@@ -381,6 +377,10 @@ class MidiView : public virtual sigc::trackable, public LineMerger
 
 	virtual bool midi_canvas_group_event(GdkEvent* ev);
 
+	int visible_channel() const { return _visible_channel; }
+	void set_visible_channel (int, bool clear_selection = true);
+	PBD::Signal<void()> VisibleChannelChanged;
+
   protected:
 	void init (std::shared_ptr<ARDOUR::MidiTrack>);
 	virtual void region_resized (const PBD::PropertyChange&);
@@ -391,6 +391,7 @@ class MidiView : public virtual sigc::trackable, public LineMerger
 	virtual void reset_width_dependent_items (double pixel_width);
 
 	void redisplay (bool view_only);
+	bool note_editable (NoteBase const *) const;
 
   protected:
 	friend class EditingContext;
@@ -540,6 +541,7 @@ class MidiView : public virtual sigc::trackable, public LineMerger
 	bool                                 _show_source;
 	Drag*                                 selection_drag;
 	Drag*                                 draw_drag;
+	int                                  _visible_channel;
 
 	/** Currently selected NoteBase objects */
 	Selection _selection;
@@ -660,6 +662,7 @@ class MidiView : public virtual sigc::trackable, public LineMerger
 			, off_velocity (ov) {}
 	};
 	std::vector<SplitInfo> split_info;
+	bool in_note_split;
 
 	uint32_t split_tuple;
 	bool     note_splitting;
@@ -687,6 +690,8 @@ class MidiView : public virtual sigc::trackable, public LineMerger
 	bool end_boundary_event (GdkEvent*);
 
 	virtual void add_control_points_to_selection (Temporal::timepos_t const &, Temporal::timepos_t const &, double y0, double y1) {}
+
+	void color_note (NoteBase*, int channel);
 };
 
 

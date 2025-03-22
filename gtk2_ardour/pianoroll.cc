@@ -17,6 +17,7 @@
  */
 
 #include "pbd/stateful_diff_command.h"
+#include "pbd/unwind.h"
 
 #include "ardour/midi_region.h"
 #include "ardour/midi_track.h"
@@ -61,7 +62,7 @@ using namespace ArdourWidgets;
 using namespace Gtkmm2ext;
 using namespace Temporal;
 
-Pianoroll::Pianoroll (std::string const & name)
+Pianoroll::Pianoroll (std::string const & name, bool with_transport)
 	: CueEditor (name)
 	, timebar_height (15.)
 	, n_timebars (3)
@@ -71,9 +72,10 @@ Pianoroll::Pianoroll (std::string const & name)
 	, bbt_metric (*this)
 	, _note_mode (Sustained)
 	, zoom_in_allocate (false)
-	, bar_adjustment (4, 1, 32, 1, 4)
-	, bar_spinner (bar_adjustment)
-	, length_label (X_("Record (Bars):"))
+	, solo_button (S_("Solo|S"))
+	, length_label (X_("Record:"))
+	, ignore_channel_changes (false)
+	, with_transport_controls (with_transport)
 {
 	mouse_mode = Editing::MouseContent;
 	autoscroll_vertical_allowed = false;
@@ -88,38 +90,34 @@ Pianoroll::Pianoroll (std::string const & name)
 	load_bindings ();
 	register_actions ();
 
-	/* this is weird because it will use an action that uses current_editing_context */
-	EditingContext* ec = current_editing_context ();
-	switch_editing_context (this);
 	set_mouse_mode (Editing::MouseContent, true);
-	switch_editing_context (ec);
 }
 
 Pianoroll::~Pianoroll ()
 {
-	delete bindings;
-	ActionManager::drop_action_group (editor_actions);
-	ActionManager::drop_action_group (snap_actions);
-}
+	delete own_bindings;
 
-bool
-Pianoroll::enter (GdkEventCrossing*)
-{
-	switch_editing_context (this);
-	return false;
+	drop_grid (); // unparent gridlines before deleting _canvas_viewport
+
+	delete view;
+	delete bg;
+	delete _canvas_viewport;
 }
 
 void
 Pianoroll::load_bindings ()
 {
-	bindings = Bindings::get_bindings (editor_name());
 	load_shared_bindings ();
+	for (auto & b : bindings) {
+		b->associate ();
+	}
+	set_widget_bindings (*get_canvas(), bindings, ARDOUR_BINDING_KEY);
 }
 
 void
 Pianoroll::register_actions ()
 {
-	editor_actions = ActionManager::create_action_group (bindings, editor_name());
+	editor_actions = ActionManager::create_action_group (own_bindings, editor_name());
 
 	bind_mouse_mode_buttons ();
 	register_grid_actions ();
@@ -210,14 +208,12 @@ Pianoroll::add_single_controller_item (Gtk::Menu_Helpers::MenuList& ctl_items,
 	}
 }
 
-static void relax() {}
-
 void
-Pianoroll::add_multi_controller_item (Gtk::Menu_Helpers::MenuList& ctl_items,
+Pianoroll::add_multi_controller_item (Gtk::Menu_Helpers::MenuList&,
                                       const uint16_t          channels,
                                       int                     ctl,
                                       const std::string&      name,
-                                      MetaButton* mb)
+                                      MetaButton*             mb)
 {
 	using namespace Gtk;
 	using namespace Gtk::Menu_Helpers;
@@ -230,6 +226,9 @@ Pianoroll::add_multi_controller_item (Gtk::Menu_Helpers::MenuList& ctl_items,
 
 	Evoral::Parameter param_without_channel (MidiCCAutomation, 0, ctl);
 
+	/* look up the parameter represented by this MetaButton */
+	ParameterButtonMap::iterator pbmi = parameter_button_map.find (mb);
+
 	for (uint8_t chn = 0; chn < 16; chn++) {
 		if (channels & (0x0001 << chn)) {
 
@@ -240,11 +239,15 @@ Pianoroll::add_multi_controller_item (Gtk::Menu_Helpers::MenuList& ctl_items,
 			chn_items.push_back (CheckMenuElem (string_compose (_("Channel %1"), chn+1),
 			                                    sigc::bind (sigc::mem_fun (*this, &Pianoroll::reset_user_cc_choice),  menu_text, fully_qualified_param, mb)));
 
-			ParameterButtonMap::iterator i = parameter_button_map.find (mb);
 
-			if (i != parameter_button_map.end()) {
-				if (fully_qualified_param == i->second) {
-					Gtk::CheckMenuItem* cmi = static_cast<Gtk::CheckMenuItem*>(&ctl_items.back());
+			if (pbmi != parameter_button_map.end()) {
+
+				/* if this parameter is the one represented by
+				   the button, mark it active in the menu
+				*/
+
+				if (fully_qualified_param == pbmi->second) {
+					Gtk::CheckMenuItem* cmi = static_cast<Gtk::CheckMenuItem*>(&chn_items.back());
 					cmi->set_active();
 				}
 			}
@@ -255,7 +258,7 @@ Pianoroll::add_multi_controller_item (Gtk::Menu_Helpers::MenuList& ctl_items,
 	 * per-channel submenu we built above.
 	 */
 
-	mb->add_item (name, menu_text, *chn_menu, sigc::ptr_fun (relax));
+	mb->add_item (name, menu_text, *chn_menu, [](){});
 }
 
 
@@ -276,10 +279,6 @@ Pianoroll::build_lower_toolbar ()
 	cc_dropdown1->add_elements (ArdourButton::Indicator);
 	cc_dropdown2->add_elements (ArdourButton::Indicator);
 	cc_dropdown3->add_elements (ArdourButton::Indicator);
-
-	cc_dropdown1->signal_led_clicked.connect (sigc::bind (sigc::mem_fun (*this, &Pianoroll::user_led_click), cc_dropdown1));
-	cc_dropdown2->signal_led_clicked.connect (sigc::bind (sigc::mem_fun (*this, &Pianoroll::user_led_click), cc_dropdown2));
-	cc_dropdown3->signal_led_clicked.connect (sigc::bind (sigc::mem_fun (*this, &Pianoroll::user_led_click), cc_dropdown3));
 
 	rebuild_parameter_button_map ();
 
@@ -312,15 +311,19 @@ Pianoroll::build_lower_toolbar ()
 	modulation_button->signal_button_release_event().connect (sigc::bind (sigc::mem_fun (*this, &Pianoroll::automation_button_event), ARDOUR::MidiCCAutomation, MIDI_CTL_MSB_MODWHEEL));
 	expression_button->signal_button_release_event().connect (sigc::bind (sigc::mem_fun (*this, &Pianoroll::automation_button_event), ARDOUR::MidiCCAutomation, MIDI_CTL_MSB_EXPRESSION));
 
-	cc_dropdown1->signal_button_release_event().connect (sigc::bind (sigc::mem_fun (*this, &Pianoroll::user_automation_button_event), cc_dropdown1), false);
-	cc_dropdown2->signal_button_release_event().connect (sigc::bind (sigc::mem_fun (*this, &Pianoroll::user_automation_button_event), cc_dropdown2), false);
-	cc_dropdown3->signal_button_release_event().connect (sigc::bind (sigc::mem_fun (*this, &Pianoroll::user_automation_button_event), cc_dropdown3), false);
-
 	velocity_button->signal_led_clicked.connect (sigc::bind (sigc::mem_fun (*this, &Pianoroll::automation_led_click), ARDOUR::MidiVelocityAutomation, 0));
 	pressure_button->signal_led_clicked.connect (sigc::bind (sigc::mem_fun (*this, &Pianoroll::automation_led_click), ARDOUR::MidiChannelPressureAutomation, 0));
 	bender_button->signal_led_clicked.connect (sigc::bind (sigc::mem_fun (*this, &Pianoroll::automation_led_click), ARDOUR::MidiPitchBenderAutomation, 0));
 	modulation_button->signal_led_clicked.connect (sigc::bind (sigc::mem_fun (*this, &Pianoroll::automation_led_click), ARDOUR::MidiCCAutomation, MIDI_CTL_MSB_MODWHEEL));
 	expression_button->signal_led_clicked.connect (sigc::bind (sigc::mem_fun (*this, &Pianoroll::automation_led_click), ARDOUR::MidiCCAutomation, MIDI_CTL_MSB_EXPRESSION));
+
+	cc_dropdown1->signal_button_release_event().connect (sigc::bind (sigc::mem_fun (*this, &Pianoroll::user_automation_button_event), cc_dropdown1), false);
+	cc_dropdown2->signal_button_release_event().connect (sigc::bind (sigc::mem_fun (*this, &Pianoroll::user_automation_button_event), cc_dropdown2), false);
+	cc_dropdown3->signal_button_release_event().connect (sigc::bind (sigc::mem_fun (*this, &Pianoroll::user_automation_button_event), cc_dropdown3), false);
+
+	cc_dropdown1->signal_led_clicked.connect (sigc::bind (sigc::mem_fun (*this, &Pianoroll::user_led_click), cc_dropdown1));
+	cc_dropdown2->signal_led_clicked.connect (sigc::bind (sigc::mem_fun (*this, &Pianoroll::user_led_click), cc_dropdown2));
+	cc_dropdown3->signal_led_clicked.connect (sigc::bind (sigc::mem_fun (*this, &Pianoroll::user_led_click), cc_dropdown3));
 
 	_toolbox.pack_start (button_bar, false, false);
 }
@@ -382,22 +385,57 @@ Pianoroll::build_upper_toolbar ()
 	note_mode_button.set_size_request (PX_SCALE(50), -1);
 	note_mode_button.set_active_color (UIConfiguration::instance().color ("alert:yellow"));
 
+	if (with_transport_controls) {
+		play_button.set_icon (ArdourIcon::TransportPlay);
+		play_button.set_name ("transport button");
+		loop_button.set_icon (ArdourIcon::TransportLoop);
+		loop_button.set_name ("transport button");
+
+		solo_button.set_name ("solo button");
+
+		play_box.set_spacing (8);
+		play_box.pack_start (play_button, false, false);
+		play_box.pack_start (loop_button, false, false);
+		play_box.pack_start (solo_button, false, false);
+		play_button.show();
+		loop_button.show();
+		solo_button.show();
+		play_box.set_no_show_all (true);
+		play_box.show ();
+
+		play_button.signal_button_release_event().connect (sigc::mem_fun (*this, &Pianoroll::play_button_press), false);
+		solo_button.signal_button_release_event().connect (sigc::mem_fun (*this, &Pianoroll::solo_button_press), false);
+		loop_button.signal_button_release_event().connect (sigc::mem_fun (*this, &Pianoroll::loop_button_press), false);
+	}
+
 	rec_enable_button.set_icon (ArdourIcon::RecButton);
 	rec_enable_button.set_sensitive (false);
 	rec_enable_button.signal_button_release_event().connect (sigc::mem_fun (*this, &Pianoroll::rec_button_press), false);
+	rec_enable_button.set_name ("record enable button");
+
+	length_selector.AddMenuElem (MenuElem (_("Until Stopped"), sigc::bind (sigc::mem_fun (*this, &Pianoroll::set_recording_length), Temporal::BBT_Offset ())));
+	length_selector.AddMenuElem (MenuElem (_("1 Bar"), sigc::bind (sigc::mem_fun (*this, &Pianoroll::set_recording_length), Temporal::BBT_Offset (1, 0, 0))));
+	std::vector<int> b ({ 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 16, 20, 24, 32 });
+	for (auto & n : b) {
+		length_selector.AddMenuElem (MenuElem (string_compose (_("%1 Bars"), n), sigc::bind (sigc::mem_fun (*this, &Pianoroll::set_recording_length), Temporal::BBT_Offset (n, 0, 0))));
+	}
+	length_selector.set_active (_("Until Stopped"));
 
 	rec_box.set_spacing (12);
 	rec_box.pack_start (rec_enable_button, false, false);
 	rec_box.pack_start (length_label, false, false);
-	rec_box.pack_start (bar_spinner, false, false);
+	rec_box.pack_start (length_selector, false, false);
 	rec_enable_button.show();
 	length_label.show ();
-	bar_spinner.show ();
+	length_selector.show ();
 	rec_box.set_no_show_all (true);
 	/* rec box not shown */
 
 	_toolbar_outer->set_border_width (6);
 	_toolbar_outer->set_spacing (12);
+	if (with_transport_controls) {
+		_toolbar_outer->pack_start (play_box, false, false);
+	}
 	_toolbar_outer->pack_start (rec_box, false, false);
 	_toolbar_outer->pack_start (visible_channel_label, false, false);
 	_toolbar_outer->pack_start (visible_channel_selector, false, false);
@@ -417,22 +455,29 @@ Pianoroll::build_upper_toolbar ()
 	_toolbar_outer->pack_start (*_toolbar_left, true, false);
 	_toolbox.pack_start (*_toolbar_outer, false, false);
 
-	Bindings* pr_bindings = Bindings::get_bindings (X_("Pianoroll"));
-	_toolbox.set_data (X_("ardour-bindings"), pr_bindings);
-
 	_contents.add (_toolbox);
-	_contents.signal_enter_notify_event().connect (sigc::mem_fun (*this, &Pianoroll::enter), false);
+	_contents.signal_unmap().connect ([this]() {_canvas_viewport->unmap ();}, false);
+	_contents.signal_map().connect ([this]() {_canvas_viewport->map ();}, false);
+}
+
+void
+Pianoroll::set_recording_length (Temporal::BBT_Offset dur)
+{
+	rec_length = dur;
 }
 
 void
 Pianoroll::set_visible_channel (int n)
 {
+	PBD::Unwinder<bool> uw (ignore_channel_changes, true);
+
 	_visible_channel = n;
 	visible_channel_selector.set_active (string_compose ("%1", _visible_channel + 1));
 
 	rebuild_parameter_button_map ();
 
 	if (view) {
+		view->set_visible_channel (n);
 		view->swap_automation_channel (n);
 	}
 }
@@ -517,7 +562,7 @@ Pianoroll::build_canvas ()
 	data_group = new ArdourCanvas::Container (hv_scroll_group);
 	CANVAS_DEBUG_NAME (data_group, "cue data group");
 
-	bg = new CueMidiBackground (data_group);
+	bg = new PianorollMidiBackground (data_group, *this);
 	_canvas_viewport->signal_size_allocate().connect (sigc::mem_fun(*this, &Pianoroll::canvas_allocate), false);
 
 	// used as rubberband rect
@@ -531,6 +576,7 @@ Pianoroll::build_canvas ()
 
 	view = new PianorollMidiView (nullptr, *data_group, *no_scroll_group, *this, *bg, 0xff0000ff);
 	view->AutomationStateChange.connect (sigc::mem_fun (*this, &Pianoroll::automation_state_changed));
+	view->VisibleChannelChanged.connect (view_connections, invalidator (*this), std::bind (&Pianoroll::visible_channel_changed, this), gui_context());
 
 	bg->set_view (view);
 	prh->set_view (view);
@@ -562,31 +608,56 @@ Pianoroll::build_canvas ()
 	_canvas->set_can_focus ();
 
 	_toolbox.pack_start (*_canvas_viewport, true, true);
+}
 
-	bindings_changed ();
+void
+Pianoroll::visible_channel_changed ()
+{
+	if (ignore_channel_changes) {
+		/* We're changing it */
+		return;
+	}
+
+	/* Something else changed it */
+
+	if (!view) {
+		return; /* Ought to be impossible */
+	}
+
+	_visible_channel = view->visible_channel();
+	visible_channel_selector.set_active (string_compose ("%1", view->visible_channel() + 1));
 }
 
 void
 Pianoroll::bindings_changed ()
 {
-	Bindings* midi_bindings = Bindings::get_bindings (X_("MIDI"));
-	Bindings* shared_bindings = Bindings::get_bindings (X_("Editing"));
-
-	_canvas_viewport->set_data (X_("ardour-bindings"), shared_bindings);
-	_canvas->set_data (X_("ardour-bindings"), midi_bindings);
+	bindings.clear ();
+	load_shared_bindings ();
 }
 
 void
 Pianoroll::maybe_update ()
 {
-	if (!_track) {
-		return;
+	ARDOUR::TriggerPtr trigger;
+
+	if (_track) {
+		trigger = _track->triggerbox()->currently_playing ();
 	}
 
-	ARDOUR::TriggerPtr trigger = _track->triggerbox()->currently_playing ();
-
 	if (!trigger) {
-		_playhead_cursor->set_position (0);
+
+		if (_drags->active() || !view) {
+			return;
+		}
+
+		samplepos_t pos = _session->transport_sample();
+		samplepos_t spos = view->midi_region()->source_position().samples();
+		if (pos < spos) {
+			_playhead_cursor->set_position (0);
+		} else {
+			_playhead_cursor->set_position (pos - spos);
+		}
+
 	} else {
 		if (trigger->active ()) {
 			_playhead_cursor->set_position (trigger->current_pos().samples() + trigger->the_region()->start().samples());
@@ -605,7 +676,6 @@ Pianoroll::canvas_enter_leave (GdkEventCrossing* ev)
 			_canvas_viewport->canvas()->grab_focus ();
 			ActionManager::set_sensitive (_midi_actions, true);
 			within_track_canvas = true;
-			EditingContext::switch_editing_context (this);
 		}
 		break;
 	case GDK_LEAVE_NOTIFY:
@@ -751,7 +821,7 @@ Pianoroll::set_trigger_start (Temporal::timepos_t const & p)
 	} else {
 		begin_reversible_command (_("trim region front"));
 		view->midi_region()->clear_changes ();
-		view->midi_region()->trim_front (view->midi_region()->position() + p);
+		view->midi_region()->trim_front (view->midi_region()->source_position() + p);
 		add_command (new StatefulDiffCommand (view->midi_region()));
 		commit_reversible_command ();
 	}
@@ -765,7 +835,7 @@ Pianoroll::set_trigger_end (Temporal::timepos_t const & p)
 	} else {
 		begin_reversible_command (_("trim region end"));
 		view->midi_region()->clear_changes ();
-		view->midi_region()->trim_end (view->midi_region()->position() + p);
+		view->midi_region()->trim_end (view->midi_region()->source_position() + p);
 		add_command (new StatefulDiffCommand (view->midi_region()));
 		commit_reversible_command ();
 	}
@@ -827,6 +897,10 @@ Pianoroll::trigger_rec_enable_change (ARDOUR::Trigger const & t)
 bool
 Pianoroll::button_press_handler (ArdourCanvas::Item* item, GdkEvent* event, ItemType item_type)
 {
+	if (event->type != GDK_BUTTON_PRESS) {
+		return false;
+	}
+
 	switch (event->button.button) {
 	case 1:
 		return button_press_handler_1 (item, event, item_type);
@@ -2086,9 +2160,12 @@ Pianoroll::rec_enable_change ()
 		rec_enable_button.set_active_state (Gtkmm2ext::ExplicitActive);
 		break;
 	case Enabled:
-		rec_enable_button.set_active_state (Gtkmm2ext::ExplicitActive);
+		std::cerr << "maybe connect to blink, armed ? " << ref.trigger()->armed() << std::endl;
 		if (!UIConfiguration::instance().get_no_strobe() && ref.trigger()->armed()) {
+			std::cerr << "connect to blink\n";
 			rec_blink_connection = Timers::blink_connect (sigc::mem_fun (*this, &Pianoroll::blink_rec_enable));
+		} else {
+			rec_enable_button.set_active_state (Gtkmm2ext::Off);
 		}
 		break;
 	case Disabled:
@@ -2097,6 +2174,49 @@ Pianoroll::rec_enable_change ()
 	}
 }
 
+bool
+Pianoroll::play_button_press (GdkEventButton* ev)
+{
+	_session->request_locate (view->midi_region()->position().samples());
+	_session->request_roll ();
+	return true;
+}
+
+bool
+Pianoroll::loop_button_press (GdkEventButton* ev)
+{
+	if (!view) {
+		return true;
+	}
+	if (!view->midi_region()) {
+		return true;
+	}
+
+	if (_session->get_play_loop()) {
+		_session->request_play_loop (false);
+	} else {
+		set_loop_range (view->midi_region()->position(), view->midi_region()->end(), _("loop region"));
+		_session->request_play_loop (true);
+	}
+
+	return true;
+}
+
+bool
+Pianoroll::solo_button_press (GdkEventButton* ev)
+{
+	if (!view) {
+		return true;
+	}
+
+	if (!view->midi_track()) {
+		return true;
+	}
+
+	view->midi_track()->solo_control()->set_value (!view->midi_track()->solo_control()->get_value(), Controllable::NoGroup);
+
+	return true;
+}
 
 bool
 Pianoroll::rec_button_press (GdkEventButton* ev)
@@ -2108,6 +2228,7 @@ Pianoroll::rec_button_press (GdkEventButton* ev)
 	}
 
 	if (!ref.box()) {
+		std::cerr << "no box\n";
 		return true;
 	}
 
@@ -2134,7 +2255,7 @@ Pianoroll::rec_button_press (GdkEventButton* ev)
 	if (trigger_armed) {
 		trigger->disarm ();
 	} else {
-		trigger->arm ();
+		trigger->arm (rec_length);
 	}
 
 	return true;
@@ -2150,7 +2271,6 @@ Pianoroll::set (TriggerReference & tref)
 
 	rec_box.show ();
 	rec_enable_button.set_sensitive (true);
-	ref.box()->RecEnableChanged.connect (object_connections, invalidator (*this), std::bind (&Pianoroll::rec_enable_change, this), gui_context());
 
 	idle_update_queued.store (0);
 
@@ -2166,9 +2286,9 @@ Pianoroll::set (TriggerReference & tref)
 
 	set_track (_track);
 
-	_update_connection = Timers::rapid_connect (sigc::mem_fun (*this, &Pianoroll::maybe_update));
 	_track->DropReferences.connect (object_connections, invalidator (*this), std::bind (&Pianoroll::unset, this), gui_context());
 	ref.trigger()->PropertyChanged.connect (object_connections, invalidator (*this), std::bind (&Pianoroll::trigger_prop_change, this, _1), gui_context());
+	ref.trigger()->ArmChanged.connect (object_connections, invalidator (*this), std::bind (&Pianoroll::rec_enable_change, this), gui_context());
 
 	if (ref.trigger()->the_region()) {
 
@@ -2211,22 +2331,37 @@ Pianoroll::set_track (std::shared_ptr<ARDOUR::MidiTrack> track)
 	                       sigc::bind (sigc::mem_fun (*this, &Pianoroll::add_single_controller_item), cc_dropdown3),
 	                       sigc::bind (sigc::mem_fun (*this, &Pianoroll::add_multi_controller_item), cc_dropdown3));
 
+	track->solo_control()->Changed.connect (object_connections, invalidator (*this), std::bind (&Pianoroll::update_solo_display, this), gui_context());
+	update_solo_display ();
+
 	// reset_user_cc_choice (Evoral::Parameter (ARDOUR::MidiCCAutomation, _visible_channel, MIDI_CTL_MSB_GENERAL_PURPOSE1), cc_dropdown1);
 	// reset_user_cc_choice (Evoral::Parameter (ARDOUR::MidiCCAutomation, _visible_channel, MIDI_CTL_MSB_GENERAL_PURPOSE2), cc_dropdown2);
 	// reset_user_cc_choice (Evoral::Parameter (ARDOUR::MidiCCAutomation, _visible_channel, MIDI_CTL_MSB_GENERAL_PURPOSE3), cc_dropdown3);
 }
 
 void
+Pianoroll::update_solo_display ()
+{
+	if (view->midi_track()->solo_control()->get_value()) {
+		solo_button.set_active_state (Gtkmm2ext::ExplicitActive);
+	} else {
+		solo_button.set_active_state (Gtkmm2ext::Off);
+	}
+}
+
+void
 Pianoroll::set_region (std::shared_ptr<ARDOUR::MidiRegion> r)
 {
 	if (!r) {
-		view->set_region (nullptr);
+		unset ();
 		return;
 	}
 
 	view->set_region (r);
 	view->show_start (true);
 	view->show_end (true);
+
+	r->DropReferences.connect (object_connections, invalidator (*this), std::bind (&Pianoroll::unset, this), gui_context());
 
 	bool provided = false;
 	std::shared_ptr<Temporal::TempoMap> map;
@@ -2248,7 +2383,7 @@ Pianoroll::set_region (std::shared_ptr<ARDOUR::MidiRegion> r)
 
 	}
 
-	set_visible_channel (0);
+	_update_connection = Timers::rapid_connect (sigc::mem_fun (*this, &Pianoroll::maybe_update));
 }
 
 void
@@ -2274,44 +2409,20 @@ Pianoroll::user_automation_button_event (GdkEventButton* ev, MetaButton* mb)
 	}
 
 	if (mb->is_led_click (ev)) {
-		user_led_click (ev, mb);
-		return true;
+		return false;
 	}
 
 	ParameterButtonMap::iterator i = parameter_button_map.find (mb);
+
 	if (i == parameter_button_map.end()) {
 		return false;
 	}
 
-	return automation_button_event (ev, i->second.type(), i->second.id());
-}
-
-bool
-Pianoroll::automation_button_event (GdkEventButton* ev, Evoral::ParameterType type, int id)
-{
-	if (ev->button != 1) {
-		return false;
+	if (view) {
+		view->set_active_automation (i->second);
 	}
 
-	SelectionOperation op = ArdourKeyboard::selection_type (ev->state);
-
-	switch (ev->type) {
-	case GDK_BUTTON_RELEASE:
-		if (view)  {
-			Evoral::Parameter param (type, _visible_channel, id);
-
-			if (view->is_visible_automation (param) && (op == SelectionSet)) {
-				op = SelectionToggle;
-			}
-
-			view->update_automation_display (param, op);
-		}
-		return true;
-	default:
-		break;
-	}
-
-	return false;
+	return true;
 }
 
 void
@@ -2321,22 +2432,27 @@ Pianoroll::user_led_click (GdkEventButton* ev, MetaButton* metabutton)
 		return;
 	}
 
-	/* Find the parameter */
-
-	ParameterButtonMap::iterator i;
-	for (i = parameter_button_map.begin(); i != parameter_button_map.end(); ++i) {
-		if (i->first == metabutton) {
-			break;
-		}
-	}
+	ParameterButtonMap::iterator i = parameter_button_map.find (metabutton);
 
 	if (i == parameter_button_map.end()) {
 		return;
 	}
 
-	if (view) {
-		view->set_active_automation (i->second);
+	automation_button_event (ev, i->second.type(), i->second.id());
+}
+
+bool
+Pianoroll::automation_button_event (GdkEventButton* ev, Evoral::ParameterType type, int id)
+{
+	if (ev->button != 1) {
+		return false;
 	}
+
+	if (view)  {
+		view->set_active_automation (Evoral::Parameter (type, _visible_channel, id));
+	}
+
+	return true;
 }
 
 void
@@ -2346,8 +2462,15 @@ Pianoroll::automation_led_click (GdkEventButton* ev, Evoral::ParameterType type,
 		return;
 	}
 
-	if (view)  {
-		view->set_active_automation (Evoral::Parameter (type, _visible_channel, id));
+	switch (ev->type) {
+	case GDK_BUTTON_RELEASE:
+		if (view)  {
+			Evoral::Parameter param (type, _visible_channel, id);
+			view->toggle_visibility (param);
+		}
+		break;
+	default:
+		break;
 	}
 }
 
@@ -2359,17 +2482,17 @@ Pianoroll::automation_state_changed ()
 	for (ParameterButtonMap::iterator i = parameter_button_map.begin(); i != parameter_button_map.end(); ++i) {
 		std::string str (ARDOUR::EventTypeMap::instance().to_symbol (i->second));
 
-		/* Indicate visible automation state with selected/not-selected visual state */
+		/* Indicate active automation state with selected/not-selected visual state */
 
-		if (view->is_visible_automation (i->second)) {
+		if (view->is_active_automation (i->second)) {
 			i->first->set_visual_state (Gtkmm2ext::Selected);
 		} else {
 			i->first->set_visual_state (Gtkmm2ext::NoVisualState);
 		}
 
-		/* Indicate active automation state with explicit widget active state (LED) */
+		/* Indicate visible automation state with explicit widget active state (LED) */
 
-		if (view->is_active_automation (i->second)) {
+		if (view->is_visible_automation (i->second)) {
 			i->first->set_active_state (Gtkmm2ext::ExplicitActive);
 		} else {
 			i->first->set_active_state (Gtkmm2ext::Off);
@@ -2423,7 +2546,12 @@ Pianoroll::max_zoom_extent() const
 {
 	if (view && view->midi_region()) {
 		/* XXX make this dependent on view _show_source setting */
-		return std::make_pair (Temporal::timepos_t (Temporal::Beats()), Temporal::timepos_t (view->midi_region()->midi_source()->length().beats()));
+
+		Temporal::Beats slen = view->midi_region()->midi_source()->length().beats();
+
+		if (slen != Temporal::Beats()) {
+			return std::make_pair (Temporal::timepos_t (Temporal::Beats()), Temporal::timepos_t (slen));
+		}
 	}
 
 	return std::make_pair (Temporal::timepos_t (Temporal::Beats()), Temporal::timepos_t (Temporal::Beats (32, 0)));
@@ -2610,4 +2738,63 @@ Pianoroll::select_all_within (Temporal::timepos_t const & start, Temporal::timep
 	}
 
 	commit_reversible_selection_op ();
+}
+
+void
+Pianoroll::set_session (ARDOUR::Session* s)
+{
+	CueEditor::set_session (s);
+
+	if (with_transport_controls) {
+		if (_session) {
+			_session->TransportStateChange.connect (_session_connections, MISSING_INVALIDATOR, std::bind (&Pianoroll::map_transport_state, this), gui_context());
+		} else {
+			_session_connections.drop_connections();
+		}
+
+		map_transport_state ();
+	}
+}
+
+void
+Pianoroll::map_transport_state ()
+{
+	if (!_session) {
+		loop_button.unset_active_state ();
+		play_button.unset_active_state ();
+		return;
+	}
+
+	if (_session->transport_rolling()) {
+
+		/* we're rolling */
+
+		if (_session->get_play_loop ()) {
+
+			loop_button.set_active (true);
+
+			if (Config->get_loop_is_mode()) {
+				play_button.set_active (true);
+			} else {
+				play_button.set_active (false);
+			}
+		} else {
+			play_button.set_active (true);
+			loop_button.set_active (false);
+		}
+	} else {
+		play_button.set_active (false);
+
+		if (Config->get_loop_is_mode()) {
+			loop_button.set_active (true);
+		} else {
+			loop_button.set_active (false);
+		}
+	}
+}
+
+bool
+Pianoroll::allow_trim_cursors () const
+{
+	return mouse_mode == Editing::MouseContent || mouse_mode == Editing::MouseTimeFX;
 }
